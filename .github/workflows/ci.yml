@@ -1,0 +1,256 @@
+name: CI
+
+# ---------------------------------------------------------------------------
+# How this avoids running on small changes
+#
+# Three independent mechanisms, because each covers a case the others miss:
+#
+#  1. paths-ignore (below)  — a push that touches ONLY docs, logs or editor config
+#                             never starts the workflow at all. Zero minutes billed.
+#  2. detect job            — for pushes that do start it, compare the diff and skip the
+#                             expensive jobs when nothing they test actually changed.
+#                             Editing only backend/ does not rebuild the frontend.
+#  3. concurrency           — a new push to the same branch cancels the previous run,
+#                             so rapid pushes cost one run, not five.
+#
+# Escape hatches: `[skip ci]` in the commit message (GitHub-native), or run the workflow
+# manually from the Actions tab via workflow_dispatch.
+# ---------------------------------------------------------------------------
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - 'security-log/**'
+      - 'LICENSE'
+      - '.gitignore'
+      - '.vscode/**'
+      - '.idea/**'
+      - '.editorconfig'
+  pull_request:
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - 'security-log/**'
+      - 'LICENSE'
+      - '.gitignore'
+      - '.vscode/**'
+      - '.idea/**'
+      - '.editorconfig'
+  workflow_dispatch:
+  schedule:
+    # Weekly on Monday 06:00 UTC. Advisories get published against code that has not moved,
+    # so the security job must run even when nothing is pushed.
+    - cron: '0 6 * * 1'
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: '24'
+
+jobs:
+  # -------------------------------------------------------------------------
+  # Which parts of the repo actually changed?
+  # -------------------------------------------------------------------------
+  detect:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    outputs:
+      backend: ${{ steps.filter.outputs.backend }}
+      cli: ${{ steps.filter.outputs.cli }}
+      deps: ${{ steps.filter.outputs.deps }}
+      any_code: ${{ steps.filter.outputs.any_code }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # dorny/paths-filter needs the base commit to diff a push event.
+          fetch-depth: 0
+
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            backend:
+              - 'backend/**'
+              - 'package.json'
+              - 'package-lock.json'
+              - 'eslint.config.mjs'
+              - '.prettierrc.json'
+            cli:
+              - 'cli/**'
+            deps:
+              - 'package-lock.json'
+              - '**/package.json'
+            any_code:
+              - 'backend/**'
+              - 'cli/**'
+              - 'scripts/**'
+              - '**/package.json'
+              - 'package-lock.json'
+              - 'eslint.config.mjs'
+              - '.prettierrc.json'
+
+  # -------------------------------------------------------------------------
+  # Cheap and always-on when any code changed: format, lint, typecheck.
+  # -------------------------------------------------------------------------
+  static:
+    name: Format, lint, typecheck
+    needs: detect
+    if: needs.detect.outputs.any_code == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - run: npm ci
+
+      - name: Prettier
+        run: npm run format:check
+
+      - name: ESLint
+        # Zero errors is the gate. Warnings are tracked as debt in verify.md, so the build
+        # is not held hostage to the long tail of `any` still being retired.
+        run: npm run lint
+
+      - name: Typecheck
+        # Runs each workspace's own compiler, not whatever npm hoists to the root.
+        run: npm run typecheck
+
+  # -------------------------------------------------------------------------
+  # Builds, split so a backend-only change does not rebuild the frontend.
+  # -------------------------------------------------------------------------
+  build-backend:
+    name: Build backend
+    needs: [detect, static]
+    if: needs.detect.outputs.backend == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - run: npm run build --workspace=backend
+
+      - name: Backend starts and answers /health
+        # A build that compiles but cannot boot is not a passing build. No secrets are
+        # configured here, so the server runs in its degraded-but-valid dev mode.
+        env:
+          NODE_ENV: development
+          PORT: '4402'
+          DATABASE_PATH: './data/ci-check.db'
+        run: |
+          cd backend
+          node dist/index.js &
+          SERVER_PID=$!
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:4402/health > /tmp/health.json 2>/dev/null; then
+              echo "health: $(cat /tmp/health.json)"
+              kill $SERVER_PID
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::backend did not answer /health within 30s"
+          kill $SERVER_PID 2>/dev/null || true
+          exit 1
+
+  # -------------------------------------------------------------------------
+  # Security review. Runs on any code change, on a schedule, and on demand.
+  # -------------------------------------------------------------------------
+  security:
+    name: Security review
+    needs: detect
+    if: >-
+      needs.detect.outputs.any_code == 'true' ||
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+
+      - name: Run security review
+        # --strict: an UNVERIFIED check fails the build. In CI every input is present, so
+        # "could not evaluate" means something is genuinely wrong.
+        run: bash scripts/security-review.sh --log --strict
+
+      - name: Upload security log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-log-${{ github.run_number }}
+          path: security-log/
+          retention-days: 90
+
+      - name: Summarise in the run page
+        if: always()
+        run: |
+          LATEST=$(ls -1t security-log/*.md 2>/dev/null | head -1)
+          if [ -n "$LATEST" ]; then
+            cat "$LATEST" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No security log produced — the review did not run." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  # -------------------------------------------------------------------------
+  # Dependency audit. Only when the dependency graph actually moved.
+  # -------------------------------------------------------------------------
+  audit:
+    name: Dependency audit
+    needs: detect
+    if: >-
+      needs.detect.outputs.deps == 'true' ||
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+
+      - name: Audit production dependencies
+        # Production only: a dev-tool advisory does not ship to users and should not block
+        # a deploy. Any critical or high in what ships is a hard failure.
+        run: npm audit --omit=dev --audit-level=high
+
+  # -------------------------------------------------------------------------
+  # Single required status check. Point branch protection at this one job.
+  # -------------------------------------------------------------------------
+  ci-passed:
+    name: CI passed
+    if: always()
+    needs: [static, build-backend, security, audit]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail if any needed job failed
+        # Skipped jobs are expected — that is the whole point of the path filtering — so
+        # only 'failure' and 'cancelled' are treated as problems.
+        run: |
+          results='${{ join(needs.*.result, ' ') }}'
+          echo "job results: $results"
+          for r in $results; do
+            if [ "$r" = "failure" ] || [ "$r" = "cancelled" ]; then
+              echo "::error::a required job did not pass"
+              exit 1
+            fi
+          done
+          echo "all required jobs passed or were skipped"

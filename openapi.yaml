@@ -1,0 +1,899 @@
+openapi: 3.1.0
+info:
+  title: Spigot API
+  version: '1.0.0'
+  description: |
+    Pay-per-call API marketplace settled in USDC on Arc Testnet.
+
+    **Two ways to pay.** Either works against the same endpoints.
+
+    1. **Credits** — sign in, buy credit once from your wallet, then call any listed
+       API with a single authenticated request. The gateway signs and settles each
+       payment for you, so there is no wallet popup per call and you never hold gas tokens.
+    2. **Direct Nanopayments** — call endpoints with signed nanopayment authorization.
+       The gateway / facilitator covers gas, so the caller needs no native gas tokens either.
+
+    **Generating a client.** This document is the source of truth. Any OpenAPI
+    generator will produce a client in your language:
+
+    ```bash
+    npx @openapitools/openapi-generator-cli generate \
+      -i https://raw.githubusercontent.com/0xSarnavo/spigot-arc/main/openapi.yaml \
+      -g python -o ./arc-client
+    ```
+  license:
+    name: Proprietary — all rights reserved
+  contact:
+    name: Spigot
+    url: https://github.com/0xSarnavo/spigot-arc
+
+servers:
+  - url: http://localhost:4402
+    description: Local development
+  - url: https://your-deployment.example.com
+    description: Your deployment
+
+tags:
+  - name: Auth
+    description: Sign in with Google, a magic link or an emailed code
+  - name: Credits
+    description: Buy and spend account credit
+  - name: Consume
+    description: Call a paid API using credit
+  - name: Marketplace
+    description: Browse listed APIs
+  - name: Publishing
+    description: List your own API and get paid
+  - name: Dashboard
+    description: Traffic, revenue and payouts for publishers
+  - name: Gateway
+    description: The raw x402 endpoint, for any x402 client
+  - name: Operations
+    description: Health and status
+
+security:
+  - sessionCookie: []
+  - bearerToken: []
+
+paths:
+  # ---------------------------------------------------------------- Auth ----
+  /api/auth/otp:
+    post:
+      tags: [Auth]
+      summary: Email a 6-digit sign-in code
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: { type: string, format: email }
+      responses:
+        '200':
+          description: Code sent
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sent: { type: boolean }
+                  channel:
+                    type: string
+                    description: '`resend` when email is configured, otherwise `console`'
+                  expiresInMinutes: { type: integer }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /api/auth/otp/verify:
+    post:
+      tags: [Auth]
+      summary: Exchange the code for a session
+      description: |
+        Sets an httpOnly session cookie. Headless clients (CLI, scripts, CI) should send
+        `mode: "token"` or the header `x-client-type: cli` to receive the raw token and
+        send it back as `Authorization: Bearer <token>`.
+
+        The token is never returned by default, because handing it to a browser in a
+        response body would expose it to any cross-site scripting flaw.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, code]
+              properties:
+                email: { type: string, format: email }
+                code: { type: string, pattern: '^[0-9]{6}$' }
+                mode:
+                  type: string
+                  enum: [token]
+                  description: Return the raw session token for headless use
+      responses:
+        '200':
+          description: Signed in
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SessionResponse' }
+        '401': { description: Incorrect or expired code }
+
+  /api/auth/magic-link:
+    post:
+      tags: [Auth]
+      summary: Email a single-use sign-in link
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: { type: string, format: email }
+      responses:
+        '200': { description: Link sent }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /api/auth/google:
+    post:
+      tags: [Auth]
+      summary: Sign in with a Google ID token
+      description: The token is verified server-side against Google's public keys.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [credential]
+              properties:
+                credential:
+                  type: string
+                  description: ID token from Google Identity Services
+      responses:
+        '200':
+          description: Signed in
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SessionResponse' }
+        '401': { description: Invalid credential }
+        '503': { description: Google sign-in is not configured on this server }
+
+  /api/auth/me:
+    get:
+      tags: [Auth]
+      summary: Current session, credit balance and wallet
+      responses:
+        '200':
+          description: Session state. `user` is null when signed out.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user:
+                    oneOf:
+                      - { $ref: '#/components/schemas/User' }
+                      - { type: 'null' }
+                  credits: { type: number, description: Spendable credit in USDC }
+                  wallet:
+                    type: object
+                    nullable: true
+                    properties:
+                      address: { type: string }
+                      optedIn: { type: boolean }
+                      explorerUrl: { type: string }
+
+  /api/auth/logout:
+    post:
+      tags: [Auth]
+      summary: Revoke the current session
+      responses:
+        '200': { description: Signed out }
+
+  # ------------------------------------------------------------- Credits ----
+  /api/credits:
+    get:
+      tags: [Credits]
+      summary: Balance, purchasable tiers and ledger history
+      responses:
+        '200':
+          description: Credit overview
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  balance: { type: number }
+                  currency: { type: string, example: USDC }
+                  tiers:
+                    type: array
+                    items: { $ref: '#/components/schemas/Tier' }
+                  custom:
+                    type: object
+                    properties:
+                      min: { type: number }
+                      max: { type: number }
+                  history:
+                    type: array
+                    items: { $ref: '#/components/schemas/CreditEntry' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/credits/recharge/quote:
+    post:
+      tags: [Credits]
+      summary: Get payment requirements for a top-up
+      description: |
+        Returns x402 v2 payment requirements to sign with your own wallet. `extra.feePayer`
+        is the facilitator's account, which pays the network fee — you need no ALGO.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                tierId:
+                  type: string
+                  description: A tier id, or `custom` with an amount
+                  example: starter
+                amount:
+                  type: number
+                  description: Required when tierId is `custom`
+      responses:
+        '200':
+          description: Requirements to sign
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tier: { $ref: '#/components/schemas/Tier' }
+                  requirements: { $ref: '#/components/schemas/PaymentRequirements' }
+                  challenge:
+                    type: string
+                    description: Base64 x402 challenge, same shape the gateway returns
+        '400': { description: Unknown tier or amount out of range }
+
+  /api/credits/recharge:
+    post:
+      tags: [Credits]
+      summary: Settle a signed top-up and add credit
+      description: |
+        The full tier is credited even when network costs mean slightly less arrives —
+        the shortfall is absorbed rather than shorting the buyer.
+
+        Requirements are rebuilt server-side, so the claimed tier must match what was
+        actually signed. The settlement transaction id is the idempotency key, so
+        replaying the same payment cannot credit twice.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tierId, paymentSignature]
+              properties:
+                tierId: { type: string }
+                amount: { type: number }
+                paymentSignature:
+                  type: string
+                  description: Base64 x402 v2 payment payload
+      responses:
+        '200':
+          description: Credit added
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  credited: { type: number }
+                  balance: { type: number }
+                  txId: { type: string }
+                  explorerUrl: { type: string }
+        '402': { description: Verification or settlement failed }
+        '409': { description: This payment has already been credited }
+
+  # ------------------------------------------------------------- Consume ----
+  /api/consume/{apiSlug}:
+    post:
+      tags: [Consume]
+      summary: Call a paid endpoint using credit
+      description: |
+        One request does everything: reserves your credit, signs and settles the payment
+        on Arc Testnet, calls the upstream and returns its response. No wallet interaction.
+
+        Credit is reserved before anything is spent on chain and refunded if the call
+        does not settle, so a failed request never costs you.
+      parameters:
+        - name: apiSlug
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [endpointId]
+              properties:
+                endpointId: { type: string }
+                query:
+                  type: object
+                  additionalProperties: { type: string }
+                body: { description: Forwarded to the upstream for non-GET endpoints }
+                headers:
+                  type: object
+                  additionalProperties: { type: string }
+      responses:
+        '200':
+          description: Upstream response plus the payment receipt
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  status: { type: integer }
+                  latencyMs: { type: integer }
+                  response: { description: Whatever the upstream returned }
+                  balance: { type: number }
+                  payment:
+                    type: object
+                    nullable: true
+                    properties:
+                      txId: { type: string }
+                      network: { type: string }
+                      amountUsdc: { type: number }
+                      explorerUrl: { type: string }
+                      paidBy: { type: string }
+                      gasPaidByFacilitator: { type: boolean }
+        '402':
+          description: Insufficient credit
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error: { type: string }
+                  required: { type: number }
+                  available: { type: number }
+                  topUpRequired: { type: boolean }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /api/consume/{apiSlug}/quote:
+    get:
+      tags: [Consume]
+      summary: Price and affordability before committing
+      parameters:
+        - name: apiSlug
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Quote
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  pricePerRequest: { type: number, nullable: true }
+                  currency: { type: string }
+                  balance: { type: number }
+                  canPay: { type: boolean }
+                  callsAffordable: { type: integer }
+
+  # --------------------------------------------------------- Marketplace ----
+  /api/apis:
+    get:
+      tags: [Marketplace]
+      summary: List every published API
+      security: []
+      responses:
+        '200':
+          description: Published APIs
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/MarketplaceApi' }
+    post:
+      tags: [Publishing]
+      summary: Register an API
+      description: |
+        Supply a plain HTTP endpoint. The gateway adds the x402 layer in front of it, so
+        your service needs no payment code — and must not itself be x402-protected.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, base_url]
+              properties:
+                name: { type: string }
+                version: { type: string, default: '1.0' }
+                base_url: { type: string, format: uri }
+                auth_type:
+                  type: string
+                  enum: [NONE, API_KEY, BEARER, BASIC]
+                  description: How the gateway authenticates to your upstream
+                auth_config:
+                  type: object
+                  description: Credentials for your upstream. Encrypted at rest, never returned.
+      responses:
+        '200':
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string }
+                  slug: { type: string }
+
+  /api/apis/{id}:
+    get:
+      tags: [Marketplace]
+      summary: One API with its endpoints
+      description: |
+        `base_url`, `auth_type` and `auth_config` are returned only to the owner. They are
+        withheld from everyone else so an upstream cannot be called directly, bypassing payment.
+      security: []
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: API detail
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  api: { type: object }
+                  endpoints:
+                    type: array
+                    items: { $ref: '#/components/schemas/Endpoint' }
+                  isOwner: { type: boolean }
+        '404': { description: Not found }
+
+  /api/apis/{id}/endpoints:
+    post:
+      tags: [Publishing]
+      summary: Add endpoints
+      description: |
+        Descriptions and examples are published to the Bazaar catalog, so describe what the
+        caller receives rather than the topic — "Temperature, conditions and 3-day forecast
+        for a city" rather than "weather data".
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                endpoints:
+                  type: array
+                  items: { $ref: '#/components/schemas/EndpointInput' }
+      responses:
+        '200': { description: Added }
+
+  /api/apis/{id}/import:
+    post:
+      tags: [Publishing]
+      summary: Import endpoints from an OpenAPI document
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [spec]
+              properties:
+                spec:
+                  type: string
+                  description: An OpenAPI document, or a URL to one
+      responses:
+        '200': { description: Endpoints extracted }
+
+  /api/apis/{id}/pricing:
+    post:
+      tags: [Publishing]
+      summary: Set the price per request
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [price_per_request]
+              properties:
+                model: { type: string, enum: [PAY_PER_USE], default: PAY_PER_USE }
+                price_per_request: { type: number, example: 0.01 }
+                currency: { type: string, default: USDC }
+      responses:
+        '200': { description: Priced }
+
+  /api/apis/{id}/publish:
+    put:
+      tags: [Publishing]
+      summary: Go live
+      description: |
+        Requires endpoints, pricing and a payout address. The upstream is probed first and
+        rejected if it demands its own payment, because the caller would then be charged
+        twice and receive a payment demand instead of data.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Published }
+        '400': { description: Incomplete, or the upstream is already x402-protected }
+
+  # ---------------------------------------------------------- Publishers ----
+  /api/publishers:
+    post:
+      tags: [Publishing]
+      summary: Become a publisher
+      description: Requires a session. Your email is taken from it rather than the request body.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+                company: { type: string }
+                website: { type: string, format: uri }
+      responses:
+        '200':
+          description: Registered
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string }
+                  api_key:
+                    type: string
+                    description: For server-to-server clients. Browsers should use the session.
+
+  /api/publishers/{id}/wallet:
+    post:
+      tags: [Publishing]
+      summary: Set or change your payout address
+      description: |
+        Setting it the first time is immediate. **Changing** it requires a confirmation code
+        emailed to you, so a stolen credential cannot silently reroute your revenue: call
+        once without `confirmationCode` to trigger the email, then again with it.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [address]
+              properties:
+                address: { type: string, description: Arc address }
+                min_payout: { type: number, default: 10 }
+                confirmationCode: { type: string, pattern: '^[0-9]{6}$' }
+      responses:
+        '200': { description: Saved }
+        '202': { description: Confirmation emailed; resend with confirmationCode }
+        '400': { description: Not a valid Arc address }
+
+  # ----------------------------------------------------------- Dashboard ----
+  /api/dashboard/{publisherId}:
+    get:
+      tags: [Dashboard]
+      summary: Traffic and revenue
+      description: Pass `active` to use the publisher tied to your session.
+      parameters:
+        - { name: publisherId, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Dashboard totals, endpoints, transactions and settlements }
+        '403': { description: Not your dashboard }
+
+  /api/dashboard/{publisherId}/calls:
+    get:
+      tags: [Dashboard]
+      summary: Every call with the transaction that paid for it
+      description: |
+        Reconcile this against your own upstream access logs. A request your server saw
+        that is not listed here, or a row with no transaction, is a discrepancy — the
+        gateway settles before proxying, so an unpaid call cannot occur by design.
+      parameters:
+        - { name: publisherId, in: path, required: true, schema: { type: string } }
+        - { name: limit, in: query, schema: { type: integer, default: 100, maximum: 500 } }
+      responses:
+        '200':
+          description: Verifiable call log
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  calls:
+                    type: array
+                    items: { $ref: '#/components/schemas/CallRecord' }
+                  unpaidCalls:
+                    type: integer
+                    description: Should always be 0. Anything else is worth reporting.
+
+  /api/dashboard/{publisherId}/settle:
+    post:
+      tags: [Dashboard]
+      summary: Pay your balance to your own wallet
+      parameters:
+        - { name: publisherId, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: Paid
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, enum: [PAID] }
+                  txId: { type: string }
+                  explorerUrl: { type: string }
+        '400': { description: Nothing due, or below the minimum payout }
+        '409': { description: No payout address set }
+
+  # ------------------------------------------------------------- Gateway ----
+  /x402/{apiSlug}/{path}:
+    get:
+      tags: [Gateway]
+      summary: Call a paid endpoint with an x402 client
+      description: |
+        The raw HTTP 402 endpoint. Standard HTTP 402 clients and Nanopayments are supported.
+
+        Without a payment header you receive `402` and a `PAYMENT-REQUIRED` challenge.
+        Sign the payment authorization and retry with `PAYMENT-SIGNATURE`; the settled transaction
+        comes back in `PAYMENT-RESPONSE`.
+
+        `extra.feePayer` in the challenge is the facilitator, which pays the network fee,
+        so the caller needs no gas tokens. All methods are supported, not only GET.
+      security: []
+      parameters:
+        - { name: apiSlug, in: path, required: true, schema: { type: string } }
+        - { name: path, in: path, required: true, schema: { type: string } }
+        - name: PAYMENT-SIGNATURE
+          in: header
+          required: false
+          schema: { type: string }
+          description: Base64 x402 v2 payment payload. Omit it to receive the challenge.
+      responses:
+        '200':
+          description: The upstream response, with the settlement in `PAYMENT-RESPONSE`
+          headers:
+            PAYMENT-RESPONSE:
+              schema: { type: string }
+              description: Base64 settlement result
+        '402':
+          description: Payment required
+          headers:
+            PAYMENT-REQUIRED:
+              schema: { type: string }
+              description: Base64 challenge, identical to the JSON body
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaymentChallenge' }
+        '404': { description: API or endpoint not found }
+
+  # ---------------------------------------------------------- Operations ----
+  /health:
+    get:
+      tags: [Operations]
+      summary: Liveness
+      security: []
+      responses:
+        '200':
+          description: Healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string }
+                  network: { type: string, enum: [testnet, mainnet] }
+                  usdcAssetId: { type: integer }
+                  facilitator: { type: string, enum: [up, unreachable] }
+
+  /admin/status:
+    get:
+      tags: [Operations]
+      summary: Treasury addresses, balances and liabilities
+      description: Requires `x-admin-token`. Kept separate from `/health` so account topology is not public.
+      security:
+        - adminToken: []
+      responses:
+        '200': { description: Operational status }
+        '401': { description: Bad token }
+        '503': { description: ADMIN_TOKEN is not configured }
+
+components:
+  securitySchemes:
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: x402_session
+      description: Set by sign-in. Used by browsers.
+    bearerToken:
+      type: http
+      scheme: bearer
+      description: The same session token, for CLI and server-to-server clients.
+    adminToken:
+      type: apiKey
+      in: header
+      name: x-admin-token
+
+  responses:
+    Unauthorized:
+      description: Authentication required
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    RateLimited:
+      description: Too many requests
+      headers:
+        Retry-After:
+          schema: { type: integer }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        error: { type: string }
+
+    User:
+      type: object
+      properties:
+        id: { type: string }
+        email: { type: string, format: email }
+        name: { type: string, nullable: true }
+        avatarUrl: { type: string, nullable: true }
+        emailVerified: { type: boolean }
+        authProviders:
+          type: array
+          items: { type: string, enum: [google, magic_link, otp] }
+        publisherId: { type: string, nullable: true }
+
+    SessionResponse:
+      type: object
+      properties:
+        user: { $ref: '#/components/schemas/User' }
+        isNew: { type: boolean }
+        token:
+          type: string
+          description: 'Only present when the caller opted in with mode=token'
+        expiresAt: { type: string, format: date-time }
+
+    Tier:
+      type: object
+      properties:
+        id: { type: string, example: starter }
+        label: { type: string, example: '$5' }
+        amountUsdc: { type: number, example: 5 }
+
+    CreditEntry:
+      type: object
+      properties:
+        id: { type: string }
+        kind: { type: string, enum: [RECHARGE, SPEND, REFUND, ADJUST] }
+        amount: { type: number, description: Positive credits, negative debits }
+        balance_after: { type: number }
+        source: { type: string, enum: [crypto, fiat, system] }
+        description: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+
+    PaymentRequirements:
+      type: object
+      description: x402 v2 payment requirements
+      properties:
+        scheme: { type: string, example: exact }
+        network:
+          type: string
+          description: CAIP-2 identifier
+          example: 'eip155:5042002'
+        asset:
+          {
+            type: string,
+            description: USDC contract address,
+            example: '0x3600000000000000000000000000000000000000',
+          }
+        amount: { type: string, description: Atomic units, example: '10000' }
+        payTo: { type: string }
+        maxTimeoutSeconds: { type: integer }
+        extra:
+          type: object
+          properties:
+            decimals: { type: integer, example: 6 }
+            feePayer: { type: string, description: Facilitator account that pays gas }
+            tag: { type: string, example: x402-global-challenge }
+
+    PaymentChallenge:
+      type: object
+      properties:
+        x402Version: { type: integer, example: 2 }
+        error: { type: string }
+        resource:
+          type: object
+          properties:
+            url: { type: string }
+            description: { type: string }
+            mimeType: { type: string }
+        accepts:
+          type: array
+          items: { $ref: '#/components/schemas/PaymentRequirements' }
+        extensions:
+          type: object
+          description: Bazaar discovery and merchant metadata
+
+    MarketplaceApi:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        slug: { type: string }
+        publisherName: { type: string }
+        description: { type: string }
+        pricePerRequest: { type: number }
+        avgLatency: { type: number, nullable: true }
+        uptime: { type: number, nullable: true }
+        skills:
+          type: array
+          items: { type: string }
+
+    Endpoint:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        description: { type: string, nullable: true }
+        method: { type: string, enum: [GET, POST, PUT, DELETE, PATCH] }
+        path: { type: string }
+        example_response: { type: string, nullable: true }
+
+    EndpointInput:
+      type: object
+      required: [name, method, path]
+      properties:
+        name: { type: string }
+        method: { type: string, enum: [GET, POST, PUT, DELETE, PATCH] }
+        path: { type: string, example: /forecast }
+        description:
+          type: string
+          description: What the caller receives. Shown in the Bazaar catalog.
+        example_response: { description: Sample response, published for discovery }
+        response_schema: { type: object }
+
+    CallRecord:
+      type: object
+      properties:
+        created_at: { type: string, format: date-time }
+        method: { type: string }
+        path: { type: string }
+        status_code: { type: integer }
+        latency_ms: { type: integer }
+        publisher_revenue: { type: number }
+        txId: { type: string, nullable: true }
+        explorerUrl: { type: string, nullable: true }

@@ -1,0 +1,15 @@
+# Railway service: backend (API + x402 gateway)
+# Set this service's Root Directory to "backend" in the Railway dashboard.
+
+[build]
+builder = "NIXPACKS"
+# Installs the whole workspace from the repo root, then compiles this service.
+buildCommand = "cd .. && npm ci && npm run build --workspace=backend"
+
+[deploy]
+startCommand = "node dist/index.js"
+healthcheckPath = "/health"
+healthcheckTimeout = 30
+# A crashed payment service should come back, but not spin forever on bad config.
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 5

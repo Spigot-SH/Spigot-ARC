@@ -1,0 +1,16 @@
+node_modules
+dist
+.next
+build
+backend/data
+package-lock.json
+*.tsbuildinfo
+frontend/next-env.d.ts
+security-log
+
+# Agent skills — third-party markdown, not ours to reformat
+.agents
+
+# Design system site. `.demo-code` is `white-space: pre`, so reflowing the HTML would visibly
+# break every code sample on the page. The `-llm.txt` files are generated, not authored.
+frontend/public/designsystem

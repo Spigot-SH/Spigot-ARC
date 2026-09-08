@@ -1,0 +1,45 @@
+Copyright (c) 2026 0xSarnavo. All rights reserved.
+
+PROPRIETARY AND CONFIDENTIAL
+
+This software and its source code, documentation, and associated materials
+(the "Software") are the proprietary property of the copyright holder.
+
+No licence, right, or permission is granted to any person or entity to use,
+copy, modify, merge, publish, distribute, sublicense, sell, host, or create
+derivative works of the Software, in whole or in part, by any means, without
+the prior express written permission of the copyright holder.
+
+The Software may be publicly visible in a source repository. Visibility does
+not constitute publication under an open source licence and does not grant any
+right to use the Software. Viewing the Software does not create any licence,
+express or implied, by estoppel or otherwise.
+
+Unauthorised use, reproduction, or distribution of the Software, or any portion
+of it, may result in civil and criminal penalties, and will be prosecuted to
+the maximum extent possible under law.
+
+THIRD-PARTY COMPONENTS
+
+The Software depends on third-party open source packages, each of which remains
+governed by its own licence. Those licences apply to those packages only and
+confer no rights in this Software. A list of dependencies and their licences can
+be produced with `npm ls --all` and `npx license-checker`.
+
+PRIOR RELEASE
+
+Versions of this Software distributed before the date of this file were made
+available under the MIT Licence. That grant, as to those versions, is not
+revoked by this notice. This licence governs this version and all subsequent
+versions.
+
+NO WARRANTY
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+For licensing enquiries, contact the copyright holder.

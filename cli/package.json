@@ -1,0 +1,22 @@
+{
+  "name": "spigot.sh",
+  "version": "0.1.0",
+  "private": true,
+  "license": "UNLICENSED",
+  "description": "List and monetise your API on Spigot from the terminal",
+  "type": "module",
+  "bin": {
+    "spigot": "./bin/spigot.mjs",
+    "spigot.sh": "./bin/spigot.mjs"
+  },
+  "files": [
+    "bin",
+    "lib"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "js-yaml": "^5.3.0"
+  }
+}
